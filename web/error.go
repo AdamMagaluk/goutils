@@ -6,7 +6,6 @@ import (
 	"net/http"
 
 	"github.com/edaniels/golog"
-
 	"go.viam.com/utils"
 )
 

@@ -1,7 +1,9 @@
 package web
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/Masterminds/sprig"
 	"github.com/edaniels/golog"
+	"go.viam.com/utils"
 )
 
 // TemplateManager responsible for managing, caching, finding templates.
@@ -133,7 +136,7 @@ func (tm *TemplateMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 
 	capW := responseWriterCapturer{ResponseWriter: w}
 	t, data, err := tm.Handler.Serve(&capW, r)
-	if HandleError(w, err, tm.Logger) {
+	if tm.handleError(w, err, tm.Logger) {
 		return
 	}
 	if capW.statusCode != 0 {
@@ -144,12 +147,64 @@ func (tm *TemplateMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	gt := t.direct
 	if gt == nil {
 		gt, err = tm.Templates.LookupTemplate(t.named)
-		if HandleError(w, err, tm.Logger) {
+		if tm.handleError(w, err, tm.Logger) {
 			return
 		}
 	}
 
-	HandleError(w, gt.Execute(w, data), tm.Logger)
+	tm.handleError(w, gt.Execute(w, data), tm.Logger)
+}
+
+// HandleError returns true if there was an error and you should stop.
+func (tm *TemplateMiddleware) handleError(w http.ResponseWriter, err error, logger golog.Logger, context ...string) bool {
+	if err == nil {
+		return false
+	}
+
+	var er ErrorResponse
+	var statusCode int
+	if errors.As(err, &er) {
+		statusCode = er.Status()
+		w.WriteHeader(er.Status())
+	} else {
+		statusCode = http.StatusInternalServerError
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+
+	if statusCode < 400 {
+		logger.Info(err)
+	} else {
+		logger.Warn(err)
+	}
+
+	templateFile := fmt.Sprintf("%d.html", statusCode)
+	templated, err := tm.Templates.LookupTemplate(templateFile)
+	if err != nil {
+		logger.Warnf("Did not find template %s %s", templateFile, err.Error())
+		writeBasicErrorResponse(w, er, context...)
+		return true
+	}
+
+	err = templated.Execute(w, er)
+	if err != nil {
+		writeBasicErrorResponse(w, er, context...)
+	}
+
+	return true
+}
+
+func writeBasicErrorResponse(w http.ResponseWriter, er ErrorResponse, context ...string) {
+	var b bytes.Buffer
+
+	for _, x := range context {
+		b.WriteString(x)
+		b.WriteByte('\n')
+	}
+	b.WriteString(er.Error())
+	b.WriteByte('\n')
+
+	_, err := b.WriteTo(w)
+	utils.UncheckedError(err)
 }
 
 func fixFiles(files []fs.DirEntry, root string) []string {
